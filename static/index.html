@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>LLM Observability Lite Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-color: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent: #3b82f6;
+            --success: #10b981;
+            --error: #ef4444;
+            --border: #334155;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .container { max-width: 1000px; margin: 0 auto; }
+        header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 15px; margin-bottom: 20px; }
+        header h1 { margin: 0; font-size: 22px; }
+        .card { background-color: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+        
+        .controls { display: flex; gap: 10px; margin-bottom: 15px; }
+        input[type="text"] { flex: 1; background: var(--bg-color); border: 1px solid var(--border); color: var(--text-color); padding: 10px; border-radius: 6px; }
+        .btn { background-color: var(--accent); color: white; border: none; padding: 10px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; }
+        .btn-danger { background-color: var(--error); }
+        .btn:hover { opacity: 0.9; }
+
+        .chart-container { position: relative; height: 200px; width: 100%; }
+        
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
+        th, td { text-align: left; padding: 12px; border-bottom: 1px solid var(--border); }
+        th { color: var(--text-muted); font-weight: 600; }
+        
+        .badge { padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
+        .badge-success { background-color: rgba(16, 185, 129, 0.2); color: var(--success); }
+        .badge-error { background-color: rgba(239, 68, 68, 0.2); color: var(--error); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📊 LLM Observability Lite</h1>
+            <button class="btn" onclick="fetchLogs()">🔄 Refresh Dashboard</button>
+        </header>
+
+        <!-- Action Panel -->
+        <div class="card">
+            <h3>Trigger Model Request</h3>
+            <div class="controls">
+                <input type="text" id="promptInput" placeholder="Enter prompt text..." value="Analyze quarterly engineering metrics">
+                <button class="btn" onclick="triggerRequest(false)">Run Success Task</button>
+                <button class="btn btn-danger" onclick="triggerRequest(true)">Trigger Deliberate Failure</button>
+            </div>
+        </div>
+
+        <!-- Performance Chart for Last 5 Tasks -->
+        <div class="card">
+            <h3>Model Latency (Last 5 Tasks Performance)</h3>
+            <div class="chart-container">
+                <canvas id="latencyChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Logs Table -->
+        <div class="card">
+            <h3>Request Trace Logs</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Request ID</th>
+                        <th>Timestamp</th>
+                        <th>Prompt</th>
+                        <th>Duration</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="logsTableBody">
+                    <tr><td colspan="5" style="text-align: center; color: var(--text-muted);">Loading logs...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        let chartInstance = null;
+
+        async function triggerRequest(simulateError) {
+            const prompt = document.getElementById('promptInput').value;
+            try {
+                await fetch('/api/v1/infer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt: prompt, model_name: 'gemma-lite-v1', simulate_error: simulateError })
+                });
+                fetchLogs();
+            } catch (err) {
+                fetchLogs();
+            }
+        }
+
+        async function fetchLogs() {
+            try {
+                const res = await fetch('/api/v1/logs');
+                const logs = await res.json();
+                
+                const tbody = document.getElementById('logsTableBody');
+                tbody.innerHTML = '';
+
+                if (logs.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">No telemetry recorded yet.</td></tr>`;
+                    updateChart([]);
+                    return;
+                }
+
+                logs.forEach(log => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td><span style="font-family: monospace; color: var(--accent);">${log.request_id}</span></td>
+                        <td>${log.timestamp}</td>
+                        <td style="max-width: 250px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${log.prompt}">${log.prompt}</td>
+                        <td>${log.duration}s</td>
+                        <td><span class="badge ${log.status === 'SUCCESS' ? 'badge-success' : 'badge-error'}">${log.status}</span></td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+
+                // Prepare chart data for the last 5 tasks (reversed for chronological order)
+                const last5 = logs.slice(0, 5).reverse();
+                updateChart(last5);
+
+            } catch (err) {
+                console.error("Failed to fetch logs:", err);
+            }
+        }
+
+        function updateChart(tasks) {
+            const labels = tasks.map(t => `#${t.request_id} (${t.status})`);
+            const data = tasks.map(t => t.duration);
+            const colors = tasks.map(t => t.status === 'SUCCESS' ? '#10b981' : '#ef4444');
+
+            const ctx = document.getElementById('latencyChart').getContext('2d');
+            
+            if (chartInstance) {
+                chartInstance.destroy();
+            }
+
+            chartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels.length ? labels : ['No Tasks'],
+                    datasets: [{
+                        label: 'Duration (s)',
+                        data: data.length ? data : [0],
+                        backgroundColor: colors.length ? colors : '#334155'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { beginAtZero: true, grid: { color: '#334155' } },
+                        x: { grid: { display: false } }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            });
+        }
+
+        // Initial fetch
+        fetchLogs();
+    </script>
+</body>
+</html>
